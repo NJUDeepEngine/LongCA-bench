@@ -49,12 +49,12 @@ from baselines.utils import (
 )
 from einops import rearrange
 
-from exps.dist_attn.baselines.shard import set_seed
-from exps.dist_attn.benchmark.enums import FlashMaskType
-from exps.dist_attn.benchmark.mask import MaskIterator
-from exps.utils.benchmark import Benchmark, do_bench_flops, perf_report
+from longca_bench.dist_attn.baselines.shard import set_seed
+from longca_bench.dist_attn.benchmark.enums import FlashMaskType
+from longca_bench.dist_attn.benchmark.mask import MaskIterator
+from longca_bench.utils.benchmark import Benchmark, do_bench_flops, perf_report
 from magi_attention.common.enum import AttnMaskType
-from exps.utils.mask import get_attn_mask_from_ffa_args
+from longca_bench.utils.mask import get_attn_mask_from_ffa_args
 
 impls = [
     "fa3",

@@ -8,7 +8,7 @@ TODO ... (add more instructions to reproduce the experiments)
 basic running command:
 
 ```bash
-cd exps/attn
+cd longca_bench/attn
 
 bash run_benchmark.sh
 ```
@@ -21,7 +21,7 @@ TODO ... (add more instructions to reproduce the experiments)
 basic running command:
 
 ```bash
-cd exps/dist_attn
+cd longca_bench/dist_attn
 
 export PYTHONPATH="${PYTHONPATH}:/path/to/LongCA-Bench/"
 
