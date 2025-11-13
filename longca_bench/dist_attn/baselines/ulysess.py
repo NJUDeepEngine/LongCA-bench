@@ -10,8 +10,8 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd,
 )
 
-from exps.dist_attn.baselines.interface import AttnBaselineInterface
-from exps.dist_attn.baselines.shard import (
+from longca_bench.dist_attn.baselines.interface import AttnBaselineInterface
+from longca_bench.dist_attn.baselines.shard import (
     ParallelMode,
     ShardMeta,
     get_cu_seqlens_padded,
@@ -20,7 +20,7 @@ from exps.dist_attn.baselines.shard import (
     zigzag_dispatch,
     zigzag_undispatch,
 )
-from exps.dist_attn.baselines.utils_cp import (  # type: ignore[attr-defined]
+from longca_bench.dist_attn.baselines.utils_cp import (  # type: ignore[attr-defined]
     AttnBackend,
     _fa3_varlen_backward,
     _fa3_varlen_forward,

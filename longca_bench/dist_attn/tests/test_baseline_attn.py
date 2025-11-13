@@ -11,9 +11,9 @@ from magi_attention.testing.dist_common import DistTestBase, with_comms
 from magi_attention.testing.precision import calc_inf_norm, extract_mismatch_info
 from torch.distributed.device_mesh import DeviceMesh
 
-from exps.dist_attn.baselines.loongtrain import LoongTrain
-from exps.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
-from exps.dist_attn.baselines.shard import (
+from longca_bench.dist_attn.baselines.loongtrain import LoongTrain
+from longca_bench.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
+from longca_bench.dist_attn.baselines.shard import (
     ParallelMode,
     get_loongtrain_pg,
     get_ring_pg,
@@ -21,10 +21,10 @@ from exps.dist_attn.baselines.shard import (
     get_usp_pg,
     set_seed,
 )
-from exps.dist_attn.baselines.ulysess import Ulysess
-from exps.dist_attn.baselines.usp import USP
-from exps.dist_attn.baselines.utils_cp import AttnBackend
-from exps.dist_attn.tests.test_utils import (
+from longca_bench.dist_attn.baselines.ulysess import Ulysess
+from longca_bench.dist_attn.baselines.usp import USP
+from longca_bench.dist_attn.baselines.utils_cp import AttnBackend
+from longca_bench.dist_attn.tests.test_utils import (
     collect_global_grad,
     get_attn_mask_from_cu_seqlens,
     ref_torch_sdpa_func,

@@ -8,10 +8,10 @@ import pandas as pd
 import torch
 import torch.distributed as dist
 
-from exps.attn.baselines.utils import calculate_attn_flops
-from exps.dist_attn.baselines.loongtrain import LoongTrain
-from exps.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
-from exps.dist_attn.baselines.shard import (
+from longca_bench.attn.baselines.utils import calculate_attn_flops
+from longca_bench.dist_attn.baselines.loongtrain import LoongTrain
+from longca_bench.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
+from longca_bench.dist_attn.baselines.shard import (
     ParallelMode,
     get_loongtrain_pg,
     get_ring_pg,
@@ -20,12 +20,12 @@ from exps.dist_attn.baselines.shard import (
     init_distributed,
     set_seed,
 )
-from exps.dist_attn.baselines.ulysess import Ulysess
-from exps.dist_attn.baselines.usp import USP
-from exps.dist_attn.baselines.utils_cp import AttnBackend
-from exps.dist_attn.benchmark.enums import FlashMaskType
-from exps.dist_attn.benchmark.mask import MaskIterator
-from exps.utils.benchmark import Benchmark, do_bench_flops, perf_report
+from longca_bench.dist_attn.baselines.ulysess import Ulysess
+from longca_bench.dist_attn.baselines.usp import USP
+from longca_bench.dist_attn.baselines.utils_cp import AttnBackend
+from longca_bench.dist_attn.benchmark.enums import FlashMaskType
+from longca_bench.dist_attn.benchmark.mask import MaskIterator
+from longca_bench.utils.benchmark import Benchmark, do_bench_flops, perf_report
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 

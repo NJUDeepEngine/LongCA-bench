@@ -9,9 +9,9 @@ import torch.distributed as dist
 from magi_attention.utils import nvtx
 from torch.testing._internal.common_distributed import MultiProcessTestCase
 
-from exps.dist_attn.baselines.loongtrain import LoongTrain
-from exps.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
-from exps.dist_attn.baselines.shard import (
+from longca_bench.dist_attn.baselines.loongtrain import LoongTrain
+from longca_bench.dist_attn.baselines.ring_attn import RingAttnAllGather, RingAttnP2P
+from longca_bench.dist_attn.baselines.shard import (
     ParallelMode,
     get_loongtrain_pg,
     get_ring_pg,
@@ -20,10 +20,10 @@ from exps.dist_attn.baselines.shard import (
     init_distributed,
     set_seed,
 )
-from exps.dist_attn.baselines.ulysess import Ulysess
-from exps.dist_attn.baselines.usp import USP
-from exps.dist_attn.baselines.utils_cp import AttnBackend
-from exps.dist_attn.tests.test_utils import (
+from longca_bench.dist_attn.baselines.ulysess import Ulysess
+from longca_bench.dist_attn.baselines.usp import USP
+from longca_bench.dist_attn.baselines.utils_cp import AttnBackend
+from longca_bench.dist_attn.tests.test_utils import (
     generate_attn_cu_seqlens,
     generate_attn_ranges,
     generate_test_data,

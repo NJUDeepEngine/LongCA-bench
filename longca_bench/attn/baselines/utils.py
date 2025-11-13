@@ -13,8 +13,8 @@ except Exception:
 import torch
 from torch.nn.attention.flex_attention import create_block_mask, create_mask
 
-from exps.dist_attn.benchmark.enums import FlashMaskType
-from exps.utils.mask import _calc_self_attn_areas
+from longca_bench.dist_attn.benchmark.enums import FlashMaskType
+from longca_bench.utils.mask import _calc_self_attn_areas
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
 

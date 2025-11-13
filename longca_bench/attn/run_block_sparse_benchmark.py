@@ -12,7 +12,7 @@ from baselines.utils import (
 )
 from einops import rearrange
 
-from exps.utils.benchmark import Benchmark, do_bench_flops, perf_report
+from longca_bench.utils.benchmark import Benchmark, do_bench_flops, perf_report
 from magi_attention.utils.sparse_utils import (
     generate_block_sparse_pattern,
     get_sdpa_mask_from_block_sparse_mask,

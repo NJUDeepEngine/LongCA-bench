@@ -1,6 +1,6 @@
 import random
 
-from exps.dist_attn.benchmark.enums import MetricsType
+from longca_bench.dist_attn.benchmark.enums import MetricsType
 
 
 def generate_seqlens(

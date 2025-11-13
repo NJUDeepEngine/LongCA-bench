@@ -1,8 +1,8 @@
 import random
 from dataclasses import dataclass
 
-from exps.dist_attn.benchmark.enums import FlashMaskType
-from exps.dist_attn.benchmark.utils import (
+from longca_bench.dist_attn.benchmark.enums import FlashMaskType
+from longca_bench.dist_attn.benchmark.utils import (
     generate_seqlens,
     seqlens2cu_seqlens,
     varlen_long_seqlen_distribution,

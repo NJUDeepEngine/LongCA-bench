@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from magi_attention.comm.functional import all_gather_fwd_scatter_bwd
 from torch.distributed.device_mesh import DeviceMesh
 
-from exps.dist_attn.baselines.utils_cp import divide_lst
+from longca_bench.dist_attn.baselines.utils_cp import divide_lst
 
 
 @dataclass

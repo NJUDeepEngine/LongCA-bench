@@ -3,9 +3,9 @@ from typing import Dict
 import torch
 import torch.distributed as dist
 
-from exps.dist_attn.baselines.interface import AttnBaselineInterface
-from exps.dist_attn.baselines.ring_attn import FA3RingAttnFunc, TERingAttnFunc
-from exps.dist_attn.baselines.shard import (
+from longca_bench.dist_attn.baselines.interface import AttnBaselineInterface
+from longca_bench.dist_attn.baselines.ring_attn import FA3RingAttnFunc, TERingAttnFunc
+from longca_bench.dist_attn.baselines.shard import (
     ParallelMode,
     ShardMeta,
     get_cu_seqlens_padded,
@@ -14,7 +14,7 @@ from exps.dist_attn.baselines.shard import (
     zigzag_dispatch,
     zigzag_undispatch,
 )
-from exps.dist_attn.baselines.utils_cp import (
+from longca_bench.dist_attn.baselines.utils_cp import (
     AttnBackend,
     _pre_process,
     _varlen_all2all_after_attn,
