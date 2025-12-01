@@ -75,8 +75,6 @@ class FA3UlysessAttnFunc(torch.autograd.Function):
         ctx.tensor_objects = tensor_objects
 
         ctx.causal = causal
-        # TODO: rm
-        ctx.dropout_p = dropout_p
         ctx.softmax_scale = softmax_scale
         ctx.deterministic = deterministic
         ctx.rumtime_meta_per_step = rumtime_meta_per_step
@@ -167,6 +165,7 @@ class TEUlysessAttnFunc(torch.autograd.Function):
         }
         fp8_meta_kwargs = {}
         window_size = (-1, 0) if causal else (-1, -1)
+
         out, aux_ctx_tensors = fused_attn_fwd(
             True,  # is_training
             max_seqlen_q,
@@ -251,7 +250,7 @@ class TEUlysessAttnFunc(torch.autograd.Function):
             "deterministic": ctx.deterministic,
         }
         fp8_meta_kwargs = {}
-        dq, dk, dv, _ = fused_attn_bwd(
+        dq, dk, dv, _, _ = fused_attn_bwd(
             ctx.max_seqlen_q,
             ctx.max_seqlen_kv,
             cu_seqlens_q,
@@ -305,6 +304,7 @@ class Ulysess(AttnBaselineInterface):
 
     # to call after q,k,v dispatch
     def pre_compute_attn_runtime_meta(self, device):
+        self.runtime_meta_per_step.clear()
         if self.backend == AttnBackend.FA3:
             shard_q_meta = self.shard_meta["q"]
             shard_kv_meta = self.shard_meta["k"]
@@ -381,6 +381,7 @@ class Ulysess(AttnBaselineInterface):
         )
 
         return x_global
+
 
     def apply_attn(
         self,
