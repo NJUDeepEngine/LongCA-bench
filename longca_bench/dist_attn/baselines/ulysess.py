@@ -382,7 +382,6 @@ class Ulysess(AttnBaselineInterface):
 
         return x_global
 
-
     def apply_attn(
         self,
         q: torch.Tensor,
