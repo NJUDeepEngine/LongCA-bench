@@ -4,9 +4,61 @@ import torch
 
 # fa3
 from flash_attn_interface import flash_attn_func, flash_attn_varlen_func
-from magi_attention.testing.precision import torch_attn_ref
 
 from magi_attention.common import AttnRanges
+from einops import rearrange
+from torch.nn.attention import SDPBackend, sdpa_kernel
+import torch.nn.functional as F
+
+
+def torch_attn_ref(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    mask: torch.Tensor,
+    softmax_scale: float | None = None,
+    softcap: float = 0.0,
+    layout: str = "thd",
+    high_precision: bool = False,
+) -> torch.Tensor:
+    assert softcap == 0.0, "non-zero softcap is not supported by now"
+
+    if layout == "thd":
+        q = rearrange(q, "t h d -> 1 h t d")
+        k = rearrange(k, "t h d -> 1 h t d")
+        v = rearrange(v, "t h d -> 1 h t d")
+    else:
+        raise ValueError(f"Unsupported layout: {layout}")
+
+    with sdpa_kernel(backends=[SDPBackend.MATH]):
+        if high_precision:
+            out = F.scaled_dot_product_attention(
+                q.to(torch.float64),  # NOTE: use fp64 as ground-truth
+                k.to(torch.float64),
+                v.to(torch.float64),
+                attn_mask=mask,
+                enable_gqa=True,
+                scale=softmax_scale,
+            )
+        else:
+            out = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=mask,
+                enable_gqa=True,
+                scale=softmax_scale,
+            )
+
+    if layout == "thd":
+        out = rearrange(out, "1 h t d -> t h d")
+    else:
+        raise ValueError(f"Unsupported layout: {layout}")
+
+    if high_precision:
+        return out.to(q.dtype)
+    else:
+        return out
 
 
 def test_fa3_func(q, k, v, dout, causal, deterministic, qkv_format="bshd"):
