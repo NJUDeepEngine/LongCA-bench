@@ -12,10 +12,12 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_bwd,
     fused_attn_fwd,
 )
-from transformer_engine.pytorch.utils import get_cudnn_version
 
 from longca_bench.dist_attn.baselines.interface import AttnBaselineInterface
-from longca_bench.dist_attn.baselines.ring_attn import prepare_input_bwd, prepare_input_fwd
+from longca_bench.dist_attn.baselines.ring_attn import (
+    prepare_input_bwd,
+    prepare_input_fwd,
+)
 from longca_bench.dist_attn.baselines.shard import (
     ParallelMode,
     ShardMeta,
@@ -42,6 +44,7 @@ from longca_bench.dist_attn.baselines.utils_cp import (
     prepare_for_saving,
     restore_from_saved,
     unflatten_data_from_varlen,
+    get_cudnn_version,
 )
 from magi_attention.common import AttnRanges
 from magi_attention.common.enum import AttnMaskType
@@ -61,7 +64,6 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
         dropout_p,
         softmax_scale,
         cp_groups,
-        cp_stream,
         deterministic,
         batch_p2p_comm=False,
     ):
@@ -70,10 +72,10 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
 
         inter_p2p_pg = cp_groups[ParallelMode.INTER_WINDOW]
         intra_p2p_pg = cp_groups[ParallelMode.INTRA_WINDOW]
-        inter_cp_size = torch.distributed.get_world_size(group=inter_p2p_pg)
-        intra_cp_size = torch.distributed.get_world_size(group=intra_p2p_pg)
-        inter_cp_rank = torch.distributed.get_rank(group=inter_p2p_pg)
-        intra_cp_rank = torch.distributed.get_rank(group=intra_p2p_pg)
+        inter_cp_size = dist.get_world_size(group=inter_p2p_pg)
+        intra_cp_size = dist.get_world_size(group=intra_p2p_pg)
+        inter_cp_rank = dist.get_rank(group=inter_p2p_pg)
+        intra_cp_rank = dist.get_rank(group=intra_p2p_pg)
 
         inter_send_dst, inter_recv_src = get_p2p_send_recv_rank(
             inter_cp_rank, inter_cp_size, inter_p2p_pg
@@ -82,7 +84,7 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
             intra_cp_rank, intra_cp_size, intra_p2p_pg
         )
 
-        cp_size = torch.distributed.get_world_size(group=cp_groups[ParallelMode.RING])
+        cp_size = dist.get_world_size(group=cp_groups[ParallelMode.RING])
         window_num = cp_size // intra_cp_size
 
         qkv_dtype = q.dtype
@@ -95,10 +97,7 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
         q_inputs = [None, None]
         intra_kv_inputs = [None, None]
         inter_kv_inputs = [None, None]
-        # create two streams to resolve wave quantization issue of Flash Attn in each step
-        flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
-        # synchronize fwd results correction across steps
-        fwd_results_correction_done = torch.cuda.Event()
+
         # Flash Attn outputs
         out_per_step = [None for _ in range(cp_size)]
         softmax_lse_per_step = [None for _ in range(cp_size)]
@@ -139,111 +138,86 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
             # inner ring loop
             intra_p2p_comm_buffers[0].copy_(local_kv)
             intra_send_recv_reqs = [[], []]
-            for i in range(intra_cp_size + 1):
-                if i < intra_cp_size:
-                    with torch.cuda.stream(flash_attn_streams[i % 2]):
-                        # wait until KV is received
-                        for req in intra_send_recv_reqs[(i + 1) % 2]:
-                            req.wait()
+            for i in range(intra_cp_size):
+                # wait until KV is received
+                for req in intra_send_recv_reqs[(i + 1) % 2]:
+                    req.wait()
 
-                        if i < (intra_cp_size - 1):
-                            # intra_p2p_comm_buffers[i + 1] = torch.empty_like(
-                            #     intra_p2p_comm_buffers[i]
-                            # )
-                            intra_send_recv_reqs[i % 2] = attn_p2p_communicate(
-                                intra_cp_rank,
-                                intra_p2p_comm_buffers[i],
-                                intra_send_dst,
-                                intra_p2p_comm_buffers[i + 1],
-                                intra_recv_src,
-                                intra_p2p_pg,
-                                batch_p2p_comm,
-                            )
-                        # contiguous tensor
-                        intra_kv_inputs[i % 2] = intra_p2p_comm_buffers[i]
-                        is_half_q, is_half_kv, is_causal = False, False, False
-                        if causal:
-                            if i == 0 and window_idx == 0:  # q, k, v
-                                is_causal = True
-                            elif (window_idx == 0 and i <= intra_cp_rank) or (
-                                0 < window_idx <= inter_cp_rank
-                            ):  # q, k0, v0
-                                is_half_kv = True
-                            else:
-                                is_half_q = True
-                        else:
-                            pass
+                if i < (intra_cp_size - 1):
+                    intra_send_recv_reqs[i % 2] = attn_p2p_communicate(
+                        intra_cp_rank,
+                        intra_p2p_comm_buffers[i],
+                        intra_send_dst,
+                        intra_p2p_comm_buffers[i + 1],
+                        intra_recv_src,
+                        intra_p2p_pg,
+                        batch_p2p_comm,
+                    )
+                # contiguous tensor
+                intra_kv_inputs[i % 2] = intra_p2p_comm_buffers[i]
+                is_half_q, is_half_kv, is_causal = False, False, False
+                if causal:
+                    if i == 0 and window_idx == 0:  # q, k, v
+                        is_causal = True
+                    elif (window_idx == 0 and i <= intra_cp_rank) or (
+                        0 < window_idx <= inter_cp_rank
+                    ):  # q, k0, v0
+                        is_half_kv = True
+                    else:
+                        is_half_q = True
+                else:
+                    pass
 
-                        rumtime_meta_per_step = runtime_meta[window_offset + i]
-                        if is_half_q:
-                            q_inputs[i % 2] = tex.thd_read_half_tensor(
-                                q, cu_seqlens_q_padded, 1
-                            )
-                        else:
-                            q_inputs[i % 2] = q
-                        if is_half_kv:
-                            intra_kv_inputs[i % 2] = tex.thd_read_half_tensor(
-                                intra_kv_inputs[i % 2], cu_seqlens_kv_padded, 0
-                            )
+                rumtime_meta_per_step = runtime_meta[window_offset + i]
+                if is_half_q:
+                    q_inputs[i % 2] = tex.thd_read_half_tensor(
+                        q, cu_seqlens_q_padded, 1
+                    )
+                else:
+                    q_inputs[i % 2] = q
+                if is_half_kv:
+                    intra_kv_inputs[i % 2] = tex.thd_read_half_tensor(
+                        intra_kv_inputs[i % 2], cu_seqlens_kv_padded, 0
+                    )
 
-                        is_half_q_per_step[window_offset + i] = is_half_q
+                is_half_q_per_step[window_offset + i] = is_half_q
 
-                        (
-                            out_per_step[window_offset + i],
-                            softmax_lse_per_step[window_offset + i],
-                        ) = _fa3_varlen_forward(
-                            q_inputs[i % 2],
-                            intra_kv_inputs[i % 2][0],
-                            intra_kv_inputs[i % 2][1],
-                            softmax_scale,
-                            is_causal,
-                            rumtime_meta_per_step,
-                            fa_forward_kwargs,
-                        )
+                (
+                    out_per_step[window_offset + i],
+                    softmax_lse_per_step[window_offset + i],
+                ) = _fa3_varlen_forward(
+                    q_inputs[i % 2],
+                    intra_kv_inputs[i % 2][0],
+                    intra_kv_inputs[i % 2][1],
+                    softmax_scale,
+                    is_causal,
+                    rumtime_meta_per_step,
+                    fa_forward_kwargs,
+                )
 
-                if i > 0:
-                    # wait until fwd restuls correction of last step is done
-                    if i > 1:
-                        flash_attn_streams[(i - 1) % 2].wait_event(
-                            fwd_results_correction_done
-                        )
+                if is_half_q:
+                    second_half_lse_seqlen = softmax_lse_per_step[
+                        window_offset + i
+                    ].shape[-1]
+                if window_idx == 0 and i == 0:
+                    out = torch.zeros_like(q)
+                    softmax_lse = torch.clone(softmax_lse_per_step[window_offset])
+                elif (
+                    (window_idx == 0 and i <= intra_cp_rank)
+                    or (0 < window_idx <= inter_cp_rank)
+                    or not causal
+                ):  # q, k0, v0
+                    flash_attn_fwd_softmax_lse_correction(
+                        softmax_lse, softmax_lse_per_step[window_offset + i]
+                    )
+                else:
+                    tex.thd_second_half_lse_correction(
+                        softmax_lse,
+                        softmax_lse_per_step[window_offset + i],
+                        cu_seqlens_q_padded,
+                        softmax_lse_in_packed_format,
+                    )
 
-                    if is_half_q:
-                        second_half_lse_seqlen = softmax_lse_per_step[
-                            window_offset + i - 1
-                        ].shape[-1]
-                    with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
-                        if window_idx == 0 and i == 1:
-                            out = torch.zeros_like(q)
-                            softmax_lse = torch.clone(
-                                softmax_lse_per_step[window_offset]
-                            ).to(torch.double)
-                        elif (
-                            (window_idx == 0 and (i - 1) <= intra_cp_rank)
-                            or (0 < window_idx <= inter_cp_rank)
-                            or not causal
-                        ):  # q, k0, v0
-                            flash_attn_fwd_softmax_lse_correction(
-                                softmax_lse, softmax_lse_per_step[window_offset + i - 1]
-                            )
-                        else:
-                            tex.thd_second_half_lse_correction(
-                                softmax_lse,
-                                softmax_lse_per_step[window_offset + i - 1],
-                                cu_seqlens_q_padded,
-                                softmax_lse_in_packed_format,
-                            )
-                    if i < intra_cp_size:
-                        flash_attn_streams[(i - 1) % 2].record_event(
-                            fwd_results_correction_done
-                        )
-
-            torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
-            # intra_p2p_comm_buffers[:] = [None] * len(intra_p2p_comm_buffers)
-
-        torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
-
-        softmax_lse = softmax_lse.to(torch.float)
         for i in range(cp_size):
             is_half = is_half_q_per_step[i]
             tex.thd_out_correction(
@@ -274,7 +248,6 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
         ctx.tensor_objects = tensor_objects
         ctx.qkv_dtype = qkv_dtype
         ctx.cp_groups = cp_groups
-        ctx.cp_stream = cp_stream
         ctx.causal = causal
         ctx.dropout_p = dropout_p
         ctx.softmax_scale = softmax_scale
@@ -292,10 +265,10 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
         intra_p2p_pg = ctx.cp_groups[ParallelMode.INTRA_WINDOW]
         inter_dkv_p2p_pg = ctx.cp_groups[ParallelMode.DKV_INTER_WINDOW]
         intra_dkv_p2p_pg = ctx.cp_groups[ParallelMode.DKV_INTRA_WINDOW]
-        inter_cp_size = torch.distributed.get_world_size(group=inter_p2p_pg)
-        intra_cp_size = torch.distributed.get_world_size(group=intra_p2p_pg)
-        inter_cp_rank = torch.distributed.get_rank(group=inter_p2p_pg)
-        intra_cp_rank = torch.distributed.get_rank(group=intra_p2p_pg)
+        inter_cp_size = dist.get_world_size(group=inter_p2p_pg)
+        intra_cp_size = dist.get_world_size(group=intra_p2p_pg)
+        inter_cp_rank = dist.get_rank(group=inter_p2p_pg)
+        intra_cp_rank = dist.get_rank(group=intra_p2p_pg)
 
         inter_send_dst, inter_recv_src = get_p2p_send_recv_rank(
             inter_cp_rank, inter_cp_size, inter_p2p_pg
@@ -303,9 +276,7 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
         intra_send_dst, intra_recv_src = get_p2p_send_recv_rank(
             intra_cp_rank, intra_cp_size, intra_p2p_pg
         )
-        cp_size = torch.distributed.get_world_size(
-            group=ctx.cp_groups[ParallelMode.RING]
-        )
+        cp_size = dist.get_world_size(group=ctx.cp_groups[ParallelMode.RING])
 
         window_num = cp_size // intra_cp_size
         batch_p2p_comm = ctx.batch_p2p_comm
@@ -494,7 +465,7 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
                 dkv = bwd_dkv_update(
                     dkv, dkv_, cu_seqlens_kv_padded, first_op, second_op
                 )
-                # assert torch.equal(dkv,dkv_send_tensor)
+
                 # intra dkv
                 if intra_cp_size > 1:
                     intra_dkv_send_recv_reqs = attn_p2p_communicate(
@@ -536,7 +507,6 @@ class FA3DoubleRingAttnFunc(torch.autograd.Function):
             req.wait()
 
         dkv = inter_dkv_inputs[window_num % 2]
-        # dkv = inter_dkv_inputs[0]
         dk, dv = dkv[0], dkv[1]
 
         return (
@@ -574,7 +544,6 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
         qkv_format,
         cp_groups,
         attn_mask_type,
-        cp_stream,
         deterministic,
         batch_p2p_comm=False,
     ):
@@ -588,10 +557,10 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
 
         inter_p2p_pg = cp_groups[ParallelMode.INTER_WINDOW]
         intra_p2p_pg = cp_groups[ParallelMode.INTRA_WINDOW]
-        inter_cp_size = torch.distributed.get_world_size(group=inter_p2p_pg)
-        intra_cp_size = torch.distributed.get_world_size(group=intra_p2p_pg)
-        inter_cp_rank = torch.distributed.get_rank(group=inter_p2p_pg)
-        intra_cp_rank = torch.distributed.get_rank(group=intra_p2p_pg)
+        inter_cp_size = dist.get_world_size(group=inter_p2p_pg)
+        intra_cp_size = dist.get_world_size(group=intra_p2p_pg)
+        inter_cp_rank = dist.get_rank(group=inter_p2p_pg)
+        intra_cp_rank = dist.get_rank(group=intra_p2p_pg)
 
         inter_send_dst, inter_recv_src = get_p2p_send_recv_rank(
             inter_cp_rank, inter_cp_size, inter_p2p_pg
@@ -601,7 +570,8 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
         )
 
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
-        cp_size = torch.distributed.get_world_size(group=cp_groups[ParallelMode.RING])
+        cp_size = dist.get_world_size(group=cp_groups[ParallelMode.RING])
+        cp_rank = dist.get_rank(group=cp_groups[ParallelMode.RING])
         window_num = cp_size // intra_cp_size
 
         qkv_dtype = q.dtype
@@ -620,10 +590,7 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
         q_inputs = [None, None]
         intra_kv_inputs = [None, None]
         inter_kv_inputs = [None, None]
-        # create two streams to resolve wave quantization issue of Flash Attn in each step
-        flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
-        # synchronize fwd results correction across steps
-        fwd_results_correction_done = torch.cuda.Event()
+
         # Flash Attn outputs
         out_per_step = [None for _ in range(cp_size)]
         softmax_lse_per_step = [None for _ in range(cp_size)]
@@ -673,158 +640,135 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
             # inner ring loop
             intra_p2p_comm_buffers[0].copy_(local_kv)
             intra_send_recv_reqs = [[], []]
-            for i in range(intra_cp_size + 1):
-                if i < intra_cp_size:
-                    with torch.cuda.stream(flash_attn_streams[i % 2]):
-                        # wait until KV is received
-                        for req in intra_send_recv_reqs[(i + 1) % 2]:
-                            req.wait()
+            for i in range(intra_cp_size):
+                # wait until KV is received
+                for req in intra_send_recv_reqs[(i + 1) % 2]:
+                    req.wait()
 
-                        if i < (intra_cp_size - 1):
-                            # intra_p2p_comm_buffers[i + 1] = torch.empty_like(
-                            #     intra_p2p_comm_buffers[i]
-                            # )
-                            intra_send_recv_reqs[i % 2] = attn_p2p_communicate(
-                                intra_cp_rank,
-                                intra_p2p_comm_buffers[i],
-                                intra_send_dst,
-                                intra_p2p_comm_buffers[i + 1],
-                                intra_recv_src,
-                                intra_p2p_pg,
-                                batch_p2p_comm,
-                            )
-                        # contiguous tensor
-                        intra_kv_inputs[i % 2] = intra_p2p_comm_buffers[i]
+                if i < (intra_cp_size - 1):
+                    intra_send_recv_reqs[i % 2] = attn_p2p_communicate(
+                        intra_cp_rank,
+                        intra_p2p_comm_buffers[i],
+                        intra_send_dst,
+                        intra_p2p_comm_buffers[i + 1],
+                        intra_recv_src,
+                        intra_p2p_pg,
+                        batch_p2p_comm,
+                    )
+                # contiguous tensor
+                intra_kv_inputs[i % 2] = intra_p2p_comm_buffers[i]
 
-                        is_half_q, is_half_kv = False, False
-                        _max_seqlen_q, _max_seqlen_kv = max_seqlen_q, max_seqlen_kv
-                        _cu_seqlens_q_padded, _cu_seqlens_kv_padded = (
-                            cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded,
+                is_half_q, is_half_kv = False, False
+                _max_seqlen_q, _max_seqlen_kv = max_seqlen_q, max_seqlen_kv
+                _cu_seqlens_q_padded, _cu_seqlens_kv_padded = (
+                    cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded,
+                )
+                if causal:
+                    if i == 0 and window_idx == 0:  # q, k, v
+                        fused_attn_meta_kwargs["attn_mask_type"] = attn_mask_type
+                    elif (window_idx == 0 and i <= intra_cp_rank) or (
+                        0 < window_idx <= inter_cp_rank
+                    ):  # q, k0, v0
+                        fused_attn_meta_kwargs["attn_mask_type"] = (
+                            "padding" if padding else "no_mask"
                         )
-                        if causal:
-                            if i == 0 and window_idx == 0:  # q, k, v
-                                fused_attn_meta_kwargs[
-                                    "attn_mask_type"
-                                ] = attn_mask_type
-                            elif (window_idx == 0 and i <= intra_cp_rank) or (
-                                0 < window_idx <= inter_cp_rank
-                            ):  # q, k0, v0
-                                fused_attn_meta_kwargs["attn_mask_type"] = (
-                                    "padding" if padding else "no_mask"
-                                )
-                                is_half_kv = True
-                                _max_seqlen_kv = max_seqlen_kv // 2
-                                _cu_seqlens_kv_padded = _cu_seqlens_kv_padded // 2
-                            else:  # q1, k, v
-                                fused_attn_meta_kwargs["attn_mask_type"] = (
-                                    "padding" if padding else "no_mask"
-                                )
-                                is_half_q = True
-                                _max_seqlen_q = max_seqlen_q // 2
-                                _cu_seqlens_q_padded = _cu_seqlens_q_padded // 2
-                        else:  # full
-                            pass
+                        is_half_kv = True
+                        _max_seqlen_kv = max_seqlen_kv // 2
+                        _cu_seqlens_kv_padded = _cu_seqlens_kv_padded // 2
+                    else:  # q1, k, v
+                        fused_attn_meta_kwargs["attn_mask_type"] = (
+                            "padding" if padding else "no_mask"
+                        )
+                        is_half_q = True
+                        _max_seqlen_q = max_seqlen_q // 2
+                        _cu_seqlens_q_padded = _cu_seqlens_q_padded // 2
+                else:  # full
+                    pass
 
-                        is_half_q_per_step[window_offset + i] = is_half_q
-                        chunk_idx_q = 1 if is_half_q else -1
-                        (
-                            q_inputs[i % 2],
-                            cu_seqlens_q_per_step[window_offset + i],
-                        ) = prepare_input_fwd(
-                            q,
-                            chunk_idx_q,
-                            cu_seqlens_q,
-                            cu_seqlens_q_padded,
-                            intra_cp_size,
-                            window_offset + intra_cp_rank,
-                        )
+                is_half_q_per_step[window_offset + i] = is_half_q
+                chunk_idx_q = 1 if is_half_q else -1
+                (
+                    q_inputs[i % 2],
+                    cu_seqlens_q_per_step[window_offset + i],
+                ) = prepare_input_fwd(
+                    q,
+                    chunk_idx_q,
+                    cu_seqlens_q,
+                    cu_seqlens_q_padded,
+                    cp_size,
+                    cp_rank,
+                )
 
-                        chunk_idx_kv = 0 if is_half_kv else -1
-                        (
-                            intra_kv_inputs[i % 2],
-                            cu_seqlens_kv_per_step[window_offset + i],
-                        ) = prepare_input_fwd(
-                            intra_kv_inputs[i % 2],
-                            chunk_idx_kv,
-                            cu_seqlens_kv,
-                            cu_seqlens_kv_padded,
-                            intra_cp_size,
-                            window_offset + (intra_cp_rank - i) % intra_cp_size,
-                        )
-                        (
-                            out_per_step[window_offset + i],
-                            aux_ctx_tensors,
-                        ) = fused_attn_fwd(
-                            True,
-                            _max_seqlen_q,
-                            _max_seqlen_kv,
-                            cu_seqlens_q_per_step[window_offset + i],
-                            cu_seqlens_kv_per_step[window_offset + i],
-                            q_inputs[i % 2],
-                            intra_kv_inputs[i % 2][0],
-                            intra_kv_inputs[i % 2][1],
-                            *fused_attn_meta_args,
-                            **fused_attn_meta_kwargs,
-                            cu_seqlens_q_padded=_cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded=_cu_seqlens_kv_padded,
-                            **{},
-                        )
-                        (
-                            softmax_lse_per_step[window_offset + i],
-                            rng_states[window_offset + i],
-                            *rest,
-                        ) = aux_ctx_tensors
+                chunk_idx_kv = 0 if is_half_kv else -1
+                (
+                    intra_kv_inputs[i % 2],
+                    cu_seqlens_kv_per_step[window_offset + i],
+                ) = prepare_input_fwd(
+                    intra_kv_inputs[i % 2],
+                    chunk_idx_kv,
+                    cu_seqlens_kv,
+                    cu_seqlens_kv_padded,
+                    cp_size,
+                    window_offset + (intra_cp_rank - i) % intra_cp_size,
+                )
+                (
+                    out_per_step[window_offset + i],
+                    aux_ctx_tensors,
+                ) = fused_attn_fwd(
+                    True,
+                    _max_seqlen_q,
+                    _max_seqlen_kv,
+                    cu_seqlens_q_per_step[window_offset + i],
+                    cu_seqlens_kv_per_step[window_offset + i],
+                    q_inputs[i % 2],
+                    intra_kv_inputs[i % 2][0],
+                    intra_kv_inputs[i % 2][1],
+                    *fused_attn_meta_args,
+                    **fused_attn_meta_kwargs,
+                    cu_seqlens_q_padded=_cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded=_cu_seqlens_kv_padded,
+                    **{},
+                )
+                (
+                    softmax_lse_per_step[window_offset + i],
+                    rng_states[window_offset + i],
+                    *rest,
+                ) = aux_ctx_tensors
 
-                if i > 0:
-                    # wait until fwd restuls correction of last step is done
-                    if i > 1:
-                        flash_attn_streams[(i - 1) % 2].wait_event(
-                            fwd_results_correction_done
-                        )
-                    # [b, np, sq, 1] -> [b, np, sq]
-                    # or [t, np, 1] -> [t, np]
-                    softmax_lse_per_step[window_offset + i - 1].squeeze_(-1)  # type: ignore[attr-defined]
-                    if softmax_lse_in_packed_format:
-                        softmax_lse_per_step[window_offset + i - 1] = (
-                            softmax_lse_per_step[window_offset + i - 1]
-                            .transpose(0, 1)
-                            .contiguous()
-                        )
-                    if is_half_q:
-                        second_half_lse_seqlen = softmax_lse_per_step[
-                            window_offset + i - 1
-                        ].shape[-1]
-                    with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
-                        if window_idx == 0 and i == 1:
-                            out = torch.zeros_like(q)
-                            softmax_lse = torch.clone(
-                                softmax_lse_per_step[window_offset]
-                            ).to(torch.double)
-                        elif (
-                            (window_idx == 0 and (i - 1) <= intra_cp_rank)
-                            or (0 < window_idx <= inter_cp_rank)
-                            or not causal
-                        ):  # q, k0, v0
-                            flash_attn_fwd_softmax_lse_correction(
-                                softmax_lse, softmax_lse_per_step[window_offset + i - 1]
-                            )
-                        else:
-                            tex.thd_second_half_lse_correction(
-                                softmax_lse,
-                                softmax_lse_per_step[window_offset + i - 1],
-                                cu_seqlens_q_padded,
-                                softmax_lse_in_packed_format,
-                            )
-                    if i < intra_cp_size:
-                        flash_attn_streams[(i - 1) % 2].record_event(
-                            fwd_results_correction_done
-                        )
-
-            # intra_p2p_comm_buffers[:] = [None] * len(intra_p2p_comm_buffers)
-            torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
-
-        torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
+                # [b, np, sq, 1] -> [b, np, sq]
+                # or [t, np, 1] -> [t, np]
+                softmax_lse_per_step[window_offset + i].squeeze_(-1)  # type: ignore[attr-defined]
+                if softmax_lse_in_packed_format:
+                    softmax_lse_per_step[window_offset + i] = (
+                        softmax_lse_per_step[window_offset + i]
+                        .transpose(0, 1)
+                        .contiguous()
+                    )
+                if is_half_q:
+                    second_half_lse_seqlen = softmax_lse_per_step[
+                        window_offset + i
+                    ].shape[-1]
+                if window_idx == 0 and i == 0:
+                    out = torch.zeros_like(q)
+                    softmax_lse = torch.clone(softmax_lse_per_step[window_offset]).to(
+                        torch.float32
+                    )
+                elif (
+                    (window_idx == 0 and i <= intra_cp_rank)
+                    or (0 < window_idx <= inter_cp_rank)
+                    or not causal
+                ):  # q, k0, v0
+                    flash_attn_fwd_softmax_lse_correction(
+                        softmax_lse, softmax_lse_per_step[window_offset + i]
+                    )
+                else:
+                    tex.thd_second_half_lse_correction(
+                        softmax_lse,
+                        softmax_lse_per_step[window_offset + i],
+                        cu_seqlens_q_padded,
+                        softmax_lse_in_packed_format,
+                    )
 
         softmax_lse = softmax_lse.to(torch.float)
         for i in range(cp_size):
@@ -860,7 +804,6 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
         ctx.tensor_objects = tensor_objects
         ctx.qkv_dtype = qkv_dtype
         ctx.cp_groups = cp_groups
-        ctx.cp_stream = cp_stream
         ctx.dropout_p = dropout_p
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
@@ -882,10 +825,10 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
         intra_p2p_pg = ctx.cp_groups[ParallelMode.INTRA_WINDOW]
         inter_dkv_p2p_pg = ctx.cp_groups[ParallelMode.DKV_INTER_WINDOW]
         intra_dkv_p2p_pg = ctx.cp_groups[ParallelMode.DKV_INTRA_WINDOW]
-        inter_cp_size = torch.distributed.get_world_size(group=inter_p2p_pg)
-        intra_cp_size = torch.distributed.get_world_size(group=intra_p2p_pg)
-        inter_cp_rank = torch.distributed.get_rank(group=inter_p2p_pg)
-        intra_cp_rank = torch.distributed.get_rank(group=intra_p2p_pg)
+        inter_cp_size = dist.get_world_size(group=inter_p2p_pg)
+        intra_cp_size = dist.get_world_size(group=intra_p2p_pg)
+        inter_cp_rank = dist.get_rank(group=inter_p2p_pg)
+        intra_cp_rank = dist.get_rank(group=intra_p2p_pg)
 
         inter_send_dst, inter_recv_src = get_p2p_send_recv_rank(
             inter_cp_rank, inter_cp_size, inter_p2p_pg
@@ -893,9 +836,7 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
         intra_send_dst, intra_recv_src = get_p2p_send_recv_rank(
             intra_cp_rank, intra_cp_size, intra_p2p_pg
         )
-        cp_size = torch.distributed.get_world_size(
-            group=ctx.cp_groups[ParallelMode.RING]
-        )
+        cp_size = dist.get_world_size(group=ctx.cp_groups[ParallelMode.RING])
         qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
 
         window_num = cp_size // intra_cp_size
@@ -938,7 +879,6 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
 
         dout_dtype = dout.dtype
         dq = torch.empty_like(q)
-        # dq = torch.empty_like(q)
         kv = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
         p2p_comm_buffers = [
             torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
@@ -1066,7 +1006,7 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
                     kv_ = kv
                 k_part, v_part = kv_[0], kv_[1]
 
-                dq_, dk_, dv_, _ = fused_attn_bwd(
+                dq_, dk_, dv_, _, _ = fused_attn_bwd(
                     _max_seqlen_q,
                     _max_seqlen_kv,
                     cu_seqlens_q_per_step[window_offset + i],
@@ -1139,7 +1079,6 @@ class TEDoubleRingAttnFunc(torch.autograd.Function):
                 dkv = bwd_dkv_update(
                     dkv, dkv_, cu_seqlens_kv_padded, first_op, second_op
                 )
-                # assert torch.equal(dkv,dkv_send_tensor)
                 # intra dkv
                 if intra_cp_size > 1:
                     intra_dkv_send_recv_reqs = attn_p2p_communicate(
@@ -1224,6 +1163,7 @@ class LoongTrain(AttnBaselineInterface):
 
     # to call after q,k,v dispatch
     def pre_compute_attn_runtime_meta(self, attn_mask_type: AttnMaskType, device):
+        self.runtime_meta_per_step.clear()
         if self.backend == AttnBackend.FA3:
             causal = attn_mask_type == AttnMaskType.CAUSAL
             shard_q_meta = self.shard_meta["q"]
@@ -1232,12 +1172,11 @@ class LoongTrain(AttnBaselineInterface):
             cp_groups = self.cp_process_group
             inter_p2p_pg = cp_groups[ParallelMode.INTER_WINDOW]
             intra_p2p_pg = cp_groups[ParallelMode.INTRA_WINDOW]
-            intra_cp_size = torch.distributed.get_world_size(group=intra_p2p_pg)
-            inter_cp_rank = torch.distributed.get_rank(group=inter_p2p_pg)
-            intra_cp_rank = torch.distributed.get_rank(group=intra_p2p_pg)
-            cp_size = torch.distributed.get_world_size(
-                group=cp_groups[ParallelMode.RING]
-            )
+            intra_cp_size = dist.get_world_size(group=intra_p2p_pg)
+            inter_cp_rank = dist.get_rank(group=inter_p2p_pg)
+            intra_cp_rank = dist.get_rank(group=intra_p2p_pg)
+            cp_size = dist.get_world_size(group=cp_groups[ParallelMode.RING])
+            cp_rank = dist.get_rank(group=cp_groups[ParallelMode.RING])
             self.runtime_meta_per_step = [None for i in range(cp_size)]
             window_num = cp_size // intra_cp_size
 
@@ -1270,16 +1209,16 @@ class LoongTrain(AttnBaselineInterface):
                     cu_seqlens_q_per_step = get_cu_seqlens_on_cp_rank(
                         shard_q_meta.cu_seqlens,
                         shard_q_meta.cu_seqlens_padded // cp_size,
-                        intra_cp_size,
-                        window_offset + intra_cp_rank,
+                        cp_size,
+                        cp_rank,
                         first_idx_q,
                         second_idx_q,
                     )
                     cu_seqlens_kv_per_step = get_cu_seqlens_on_cp_rank(
                         shard_kv_meta.cu_seqlens,
                         shard_kv_meta.cu_seqlens_padded // cp_size,
-                        intra_cp_size,
-                        window_offset + (intra_cp_rank - i) % intra_cp_size,
+                        cp_size,
+                        window_offset + ((intra_cp_rank - i) % intra_cp_size),
                         first_idx_kv,
                         second_idx_kv,
                     )
@@ -1297,6 +1236,8 @@ class LoongTrain(AttnBaselineInterface):
                         device,
                     )
                     self.runtime_meta_per_step[window_offset + i] = rumtime_meta
+
+        print(f"{self.runtime_meta_per_step=}")
 
     def dispatch(
         self,
@@ -1375,8 +1316,6 @@ class LoongTrain(AttnBaselineInterface):
         v_layer = _varlen_all2all_before_attn(v, self.pg_a2a)
 
         batch_p2p_comm = False
-        with torch.cuda.device(q.device):
-            cp_stream = torch.cuda.Stream()
 
         # ring attention p2p
         shard_q_meta = self.shard_meta["q"]
@@ -1403,7 +1342,6 @@ class LoongTrain(AttnBaselineInterface):
                 "thd",
                 self.cp_process_group,
                 attn_mask,
-                cp_stream,
                 deterministic,
                 batch_p2p_comm,
             )
@@ -1425,7 +1363,6 @@ class LoongTrain(AttnBaselineInterface):
                 dropout_p,
                 softmax_scale,
                 self.cp_process_group,
-                cp_stream,
                 deterministic,
                 batch_p2p_comm,
             )

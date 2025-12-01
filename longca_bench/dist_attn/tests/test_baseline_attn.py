@@ -271,37 +271,37 @@ class TestBaselineAttn(DistTestBase):
                 },
                 "world_size": 8,
             },
-            # {
-            #     "name": AttnImpl.RING_ALLGATHER,
-            #     "cp_pg_meta": {
-            #         ParallelMode.RING: 4,
-            #     },
-            #     "world_size": 4,
-            # },
-            # {
-            #     "name": AttnImpl.RING_P2P,
-            #     "cp_pg_meta": {
-            #         ParallelMode.RING: 4,
-            #     },
-            #     "world_size": 4,
-            # },
-            # {
-            #     "name": AttnImpl.USP,
-            #     "cp_pg_meta": {
-            #         ParallelMode.RING: 2,
-            #         ParallelMode.ULYSESS: 2,
-            #     },
-            #     "world_size": 4,
-            # },
-            # {
-            #     "name": AttnImpl.LOONGTRAIN,
-            #     "cp_pg_meta": {
-            #         ParallelMode.RING: 2,
-            #         ParallelMode.ULYSESS: 2,
-            #     },
-            #     "world_size": 4,
-            #     "window_num": 2,
-            # },
+            {
+                "name": AttnImpl.RING_ALLGATHER,
+                "cp_pg_meta": {
+                    ParallelMode.RING: 8,
+                },
+                "world_size": 8,
+            },
+            {
+                "name": AttnImpl.RING_P2P,
+                "cp_pg_meta": {
+                    ParallelMode.RING: 8,
+                },
+                "world_size": 8,
+            },
+            {
+                "name": AttnImpl.USP,
+                "cp_pg_meta": {
+                    ParallelMode.RING: 4,
+                    ParallelMode.ULYSESS: 2,
+                },
+                "world_size": 8,
+            },
+            {
+                "name": AttnImpl.LOONGTRAIN,
+                "cp_pg_meta": {
+                    ParallelMode.RING: 4,
+                    ParallelMode.ULYSESS: 2,
+                },
+                "world_size": 8,
+                "window_num": 2,
+            },
         ],
     )
     @parameterize(
