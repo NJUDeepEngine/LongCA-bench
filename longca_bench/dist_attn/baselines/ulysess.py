@@ -1,4 +1,5 @@
-from typing import Dict
+from typing import Dict, List
+import copy
 
 import torch
 
@@ -327,7 +328,7 @@ class Ulysess(AttnBaselineInterface):
         x_global: torch.Tensor,
         ranges: AttnRanges,
         valid_total_seqlen: int,  # required by AttnRanges.to_cu_seqlens
-        name: str,  # key name for shard_meta
+        name: str | List[str],  # key names for shard_meta
     ):
         # pre-process data
         x_global_varlen, origin_shape, cu_seqlens, host_cu_seqlens = _pre_process(
@@ -352,7 +353,10 @@ class Ulysess(AttnBaselineInterface):
         )
 
         max_seqlen_padded = get_max_seqlen(host_cu_seqlens_padded)
-        self.shard_meta[name] = ShardMeta(
+        dispatch_keys = name
+        if isinstance(name, str):
+            dispatch_keys = [name]
+        shard_meta = ShardMeta(
             cu_seqlens=cu_seqlens,
             cu_seqlens_padded=cu_seqlens_padded,
             host_cu_seqlens=host_cu_seqlens,
@@ -360,6 +364,8 @@ class Ulysess(AttnBaselineInterface):
             origin_shape=origin_shape,
             max_seqlen_padded=max_seqlen_padded,
         )
+        for key in dispatch_keys:
+            self.shard_meta[key] = copy.deepcopy(shard_meta)
         return x_local
 
     def undispatch(
