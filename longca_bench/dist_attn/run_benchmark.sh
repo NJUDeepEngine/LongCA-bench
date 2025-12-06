@@ -1,40 +1,30 @@
-# export CUDA_VISIBLE_DEVICES=1,2,3,4
-
-export GPUS_PER_NODE=8
 export NNODES=${NNODES:-1}
-export WORLD_SIZE=$((NNODES * GPUS_PER_NODE))
-echo $WORLD_SIZE
+export GPUS_PER_NODE=8
+export WORLD_SIZE=$((GPUS_PER_NODE * NNODES))
 export NODE_RANK=${RANK:-0}
-export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
-export MASTER_PORT=${MASTER_PORT:-16988}
+export MAGI_ATTENTION_HIERARCHICAL_COMM=${MAGI_ATTENTION_HIERARCHICAL_COMM:-0}
+
+if [[ $NNODES -eq 1 ]]; then # single-node
+    export MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+    export MASTER_PORT=${MASTER_PORT:-16988}
+fi
 
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 
+export PYTHONPATH=../../
 
-for k in {0..1}; do
-    for j in {0..3}; do
-        for i in {0..4}; do
-            export BASELINE_INDEX=$i
-            export MASKTYPE_INDEX=$j
-            export WD_INDEX=$k
-            export MASTER_PORT=$((MASTER_PORT + 1))
+export CUDA_DEVICE_MAX_CONNECTIONS=8
+echo "set CUDA_DEVICE_MAX_CONNECTIONS=8"
 
-            DISTRIBUTED_ARGS="
-                --nproc_per_node $GPUS_PER_NODE \
-                --nnodes $NNODES \
-                --node_rank $NODE_RANK \
-                --master_addr $MASTER_ADDR \
-                --master_port $MASTER_PORT
-            "
+DISTRIBUTED_ARGS="
+    --nproc_per_node $GPUS_PER_NODE \
+    --nnodes $NNODES \
+    --node_rank $NODE_RANK \
+    --master_addr $MASTER_ADDR \
+    --master_port $MASTER_PORT
+"
 
-            echo $DISTRIBUTED_ARGS
+echo $DISTRIBUTED_ARGS
 
-            TORCHRUN_CMD="torchrun $DISTRIBUTED_ARGS run_benchmark.py"
-            $TORCHRUN_CMD
-
-            wait
-
-            python -c "import torch; torch.cuda.empty_cache()"
-        done
-    done
-done
+TORCHRUN_CMD="torchrun $DISTRIBUTED_ARGS run_benchmark.py"
+$TORCHRUN_CMD
