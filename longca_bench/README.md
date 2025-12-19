@@ -19,12 +19,47 @@ bash run_benchmark.sh
 basic running command:
 
 ```bash
-cd longca_bench/dist_attn
+cd exps/dist_attn
 
 export PYTHONPATH="${PYTHONPATH}:/path/to/LongCA-Bench/"
 
+bash run_benchmark.sh --config config_file --profile output_name
+```
+
+bench with custom config file:
+
+```bash
+cd exps/dist_attn
+
+# 1. Use the default config file (`exps/dist_attn/benchmark_conf.py`)
+bash run_benchmark.sh
+
+# 2. Use the specific config file
+bash run_benchmark.sh --config config_file
+
+# 3. Use the specific config file
+bash run_benchmark.sh --config=config_file
+```
+
+bench with nsys profiler command:
+
+```bash
+cd exps/dist_attn
+
+# 1. Enable profiling with default output name (cp_benchmark)
+bash run_benchmark.sh --profile
+
+# 2. Enable profiling and specify an output name
+bash run_benchmark.sh --profile output_name
+
+# 3. Equivalent syntax using '='
+bash run_benchmark.sh --profile=output_name
+
+# 4. Disable profiling by default
 bash run_benchmark.sh
 ```
+
+When benchmarking with profiling, user can set env vars `PROFILE_ITER` and `PROFILE_WARMUP` to additionally control the number of iterations and warmups.
 
 custom bench configuration:
 
